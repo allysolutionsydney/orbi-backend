@@ -4,12 +4,12 @@ from models.schemas import ChatRequest, ChatResponse, ChatMessage
 from services.claude import chat, chat_stream
 from services.memory import search_memories, store_conversation_turn, auto_extract_and_store
 from services.voice import text_to_speech
+from services.ai_provider import list_providers
 from supabase import create_client
 import os
 import json
 
 router = APIRouter()
-
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
 
 
@@ -37,33 +37,43 @@ def save_message(user_id: str, role: str, content: str):
 
 
 def get_user_profile(user_id: str) -> dict:
+    """Fetch the user's full profile including their chosen AI provider."""
     result = supabase.table("users").select("*").eq("user_id", user_id).limit(1).execute()
     return result.data[0] if result.data else {}
 
 
 @router.post("/", response_model=ChatResponse)
 async def send_message(req: ChatRequest):
-    """Main chat endpoint. Retrieves memories, calls Claude, stores response."""
+    """
+    Main chat endpoint.
+    Automatically uses the user's chosen AI provider (OpenAI, Claude, Gemini, etc.)
+    """
     try:
         # 1. Fetch context
         history = get_conversation_history(req.user_id)
         memories = search_memories(req.user_id, req.message, limit=15)
         profile = get_user_profile(req.user_id)
 
-        # 2. Get ORBI's reply
+        # 2. Get provider preference from user profile
+        provider_name = profile.get("ai_provider") or None
+        model_name = profile.get("ai_model") or None
+
+        # 3. Get ORBI's reply using the user's chosen AI brain
         reply = chat(
             message=req.message,
             conversation_history=history,
             memories=memories,
             user_profile=profile,
             image_base64=req.image_base64 if req.include_vision else None,
+            provider_name=provider_name,
+            model_name=model_name,
         )
 
-        # 3. Persist both turns
+        # 4. Persist both turns
         save_message(req.user_id, "user", req.message)
         save_message(req.user_id, "assistant", reply)
 
-        # 4. Auto-extract memorable facts in background
+        # 5. Auto-extract memorable facts in background
         conversation_snippet = f"User: {req.message}\nORBI: {reply}"
         try:
             auto_extract_and_store(req.user_id, conversation_snippet)
@@ -80,24 +90,29 @@ async def send_message(req: ChatRequest):
 async def send_message_voice(req: ChatRequest):
     """
     Same as /chat but returns MP3 audio of ORBI's response.
-    The mobile app plays this directly through the speaker/earbuds.
+    The mobile app / glasses play this directly through the speaker/earbuds.
     """
     try:
         history = get_conversation_history(req.user_id)
         memories = search_memories(req.user_id, req.message, limit=15)
         profile = get_user_profile(req.user_id)
 
+        provider_name = profile.get("ai_provider") or None
+        model_name = profile.get("ai_model") or None
+
         reply = chat(
             message=req.message,
             conversation_history=history,
             memories=memories,
             user_profile=profile,
+            provider_name=provider_name,
+            model_name=model_name,
         )
 
         save_message(req.user_id, "user", req.message)
         save_message(req.user_id, "assistant", reply)
 
-        # Convert reply to audio
+        # Convert reply to audio for glasses/earbuds
         audio_bytes = await text_to_speech(reply)
 
         return Response(
@@ -112,18 +127,24 @@ async def send_message_voice(req: ChatRequest):
 
 @router.get("/stream")
 async def stream_message(user_id: str, message: str):
-    """Server-sent events stream for real-time token-by-toker response."""
+    """Server-sent events stream for real-time token-by-token response."""
     async def event_generator():
         history = get_conversation_history(user_id)
         memories = search_memories(user_id, message, limit=15)
         profile = get_user_profile(user_id)
 
+        provider_name = profile.get("ai_provider") or None
+        model_name = profile.get("ai_model") or None
+
         full_reply = []
-        async for token in chat_stream(message, history, memories, profile):
+        async for token in chat_stream(
+            message, history, memories, profile,
+            provider_name=provider_name,
+            model_name=model_name,
+        ):
             full_reply.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
 
-        # Store after stream completes
         complete_reply = "".join(full_reply)
         save_message(user_id, "user", message)
         save_message(user_id, "assistant", complete_reply)
@@ -151,3 +172,12 @@ async def clear_history(user_id: str):
     """Clear conversation history (not memories — those persist)."""
     supabase.table("conversations").delete().eq("user_id", user_id).execute()
     return {"cleared": True}
+
+
+@router.get("/providers")
+async def get_providers():
+    """
+    Return all available AI providers and their models.
+    Used by the mobile app settings screen so users can pick their AI brain.
+    """
+    return {"providers": list_providers()}
