@@ -1,19 +1,17 @@
 """
-ORBI Chat Service — powered by OpenAI GPT-4o
-Replaces the original Anthropic Claude implementation.
-All function signatures are identical so routes need no changes.
+ORBI Chat Orchestration Service
+=================================
+This module handles the chat logic: building context from memories + user
+profile, calling the AI provider, and returning responses.
+
+The AI provider is now fully swappable — pass provider_name + model_name
+and ORBI will use whichever brain the user has chosen.
 """
-import os
 import json
 from typing import List, Optional, AsyncGenerator
-from openai import OpenAI, AsyncOpenAI
-from models.schemas import MemoryItem
+from models.schemas import MemoryItem, ChatMessage
+from services.ai_provider import get_provider, AIProvider
 
-# ── Clients ───────────────────────────────────────────────────────────────────
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-_async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-CHAT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 MAX_TOKENS = 1024
 
 # ── ORBI Personality ──────────────────────────────────────────────────────────
@@ -78,30 +76,26 @@ def build_context_from_memories(
     )
 
 
-def chat(
+def _build_messages(
     message: str,
-    conversation_history: List[dict],
+    conversation_history: List[ChatMessage],
     memories: Optional[List[MemoryItem]] = None,
     user_profile: Optional[dict] = None,
     image_base64: Optional[str] = None,
-) -> str:
-    """
-    Send a message to GPT-4o and return the reply string.
-    conversation_history: list of {"role": "user"|"assistant", "content": "..."}
-    image_base64: optional data URI (e.g. "data:image/jpeg;base64,...")
-    """
+) -> List[dict]:
+    """Build the full messages list for the AI provider."""
     context = build_context_from_memories(memories or [], user_profile)
     system = ORBI_SYSTEM_PROMPT + context
 
     messages = [{"role": "system", "content": system}]
 
-    # Add history (last 20 turns to stay within context budget)
+    # Add conversation history
     for turn in conversation_history[-20:]:
-        role = turn.role if hasattr(turn, 'role') else turn["role"]
-        content = turn.content if hasattr(turn, 'content') else turn["content"]
+        role = turn.role if hasattr(turn, "role") else turn["role"]
+        content = turn.content if hasattr(turn, "content") else turn["content"]
         messages.append({"role": role, "content": content})
 
-    # Build user message — with optional image
+    # Build user message — with optional image (vision input from glasses/camera)
     if image_base64:
         img_url = (
             image_base64
@@ -116,55 +110,55 @@ def chat(
         user_content = message
 
     messages.append({"role": "user", "content": user_content})
+    return messages
 
-    response = _client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=0.8,
+
+def chat(
+    message: str,
+    conversation_history: List[ChatMessage],
+    memories: Optional[List[MemoryItem]] = None,
+    user_profile: Optional[dict] = None,
+    image_base64: Optional[str] = None,
+    provider_name: Optional[str] = None,
+    model_name: Optional[str] = None,
+) -> str:
+    """
+    Send a message to the user's chosen AI provider and return the reply.
+
+    provider_name: "openai" | "anthropic" | "gemini" | "ollama" | "groq" | ...
+    model_name:    specific model override (e.g. "gpt-4o-mini", "claude-haiku-4-5-20251001")
+    """
+    provider = get_provider(provider_name, model_name)
+    messages = _build_messages(
+        message, conversation_history, memories, user_profile, image_base64
     )
-    return response.choices[0].message.content
+    return provider.chat(messages, max_tokens=MAX_TOKENS, temperature=0.8)
 
 
 async def chat_stream(
     message: str,
-    conversation_history: List[dict],
+    conversation_history: List[ChatMessage],
     memories: Optional[List[MemoryItem]] = None,
     user_profile: Optional[dict] = None,
+    provider_name: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields token chunks for SSE streaming."""
-    context = build_context_from_memories(memories or [], user_profile)
-    system = ORBI_SYSTEM_PROMPT + context
-
-    messages = [{"role": "system", "content": system}]
-    for turn in conversation_history[-20:]:
-        role = turn.role if hasattr(turn, 'role') else turn["role"]
-        content = turn.content if hasattr(turn, 'content') else turn["content"]
-        messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": message})
-
-    stream = await _async_client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=0.8,
-        stream=True,
-    )
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    provider = get_provider(provider_name, model_name)
+    messages = _build_messages(message, conversation_history, memories, user_profile)
+    async for token in provider.stream(messages, max_tokens=MAX_TOKENS, temperature=0.8):
+        yield token
 
 
-def extract_memory_facts(conversation_snippet: str) -> List[dict]:
+def extract_memory_facts(conversation_snippet: str, provider_name: Optional[str] = None) -> List[dict]:
     """
-    Ask GPT-4o to extract memorable facts from a conversation snippet.
+    Extract memorable facts from a conversation snippet.
     Returns a list of dicts: [{content, type, importance, tags}]
     """
     prompt = f"""Extract memorable facts about the user from this conversation.
-Return a JSON array of objects with fields:
+Return a JSON array of objects with fields
   content    (string) — the fact, written as a statement about the user
-  type       (string) — one of: fact, preference, goal, event, conversation
+  type       (string) - one of: fact, preference, goal, event, conversation
   importance (float)  — 0.0 to 1.0
   tags       (array)  — relevant keyword tags
 
@@ -176,15 +170,9 @@ Conversation:
 
 Return ONLY valid JSON, nothing else."""
 
-    response = _client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=512,
-        temperature=0.2,
-    )
-    raw = response.choices[0].message.content.strip()
+    provider = get_provider(provider_name)
+    raw = provider.raw_completion(prompt, max_tokens=512, temperature=0.2).strip()
 
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
