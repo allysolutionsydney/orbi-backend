@@ -85,49 +85,112 @@ def chat(
     user_profile: Optional[dict] = None,
     image_base64: Optional[str] = None,
 ) -> str:
+    """
+    Send a message to GPT-4o and return the reply string.
+    conversation_history: list of {"role": "user"|"assistant", "content": "..."}
+    image_base64: optional data URI (e.g. "data:image/jpeg;base64,...")
+    """
     context = build_context_from_memories(memories or [], user_profile)
     system = ORBI_SYSTEM_PROMPT + context
+
     messages = [{"role": "system", "content": system}]
+
+    # Add history (last 20 turns to stay within context budget)
     for turn in conversation_history[-20:]:
-        messages.append({"role": turn["role"], "content": turn["content"]})
+        role = turn.role if hasattr(turn, 'role') else turn["role"]
+        content = turn.content if hasattr(turn, 'content') else turn["content"]
+        messages.append({"role": role, "content": content})
+
+    # Build user message — with optional image
     if image_base64:
-        img_url = image_base64 if image_base64.startswith("data:") else f"data:image/jpeg;base64,{image_base64}"
-        user_content = [{"type": "text", "text": message}, {"type": "image_url", "image_url": {"url": img_url, "detail": "auto"}}]
+        img_url = (
+            image_base64
+            if image_base64.startswith("data:")
+            else f"data:image/jpeg;base64,{image_base64}"
+        )
+        user_content = [
+            {"type": "text", "text": message},
+            {"type": "image_url", "image_url": {"url": img_url, "detail": "auto"}},
+        ]
     else:
         user_content = message
+
     messages.append({"role": "user", "content": user_content})
-    response = _client.chat.completions.create(model=CHAT_MODEL, messages=messages, max_tokens=MAX_TOKENS, temperature=0.8)
+
+    response = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=0.8,
+    )
     return response.choices[0].message.content
 
 
-async def chat_stream(message, conversation_history, memories=None, user_profile=None):
+async def chat_stream(
+    message: str,
+    conversation_history: List[dict],
+    memories: Optional[List[MemoryItem]] = None,
+    user_profile: Optional[dict] = None,
+) -> AsyncGenerator[str, None]:
+    """Async generator that yields token chunks for SSE streaming."""
     context = build_context_from_memories(memories or [], user_profile)
     system = ORBI_SYSTEM_PROMPT + context
+
     messages = [{"role": "system", "content": system}]
     for turn in conversation_history[-20:]:
-        messages.append({"role": turn["role"], "content": turn["content"]})
+        role = turn.role if hasattr(turn, 'role') else turn["role"]
+        content = turn.content if hasattr(turn, 'content') else turn["content"]
+        messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": message})
-    stream = await _async_client.chat.completions.create(model=CHAT_MODEL, messages=messages, max_tokens=MAX_TOKENS, temperature=0.8, stream=True)
+
+    stream = await _async_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=0.8,
+        stream=True,
+    )
     async for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
 
 
-def extract_memory_facts(conversation_snippet):
+def extract_memory_facts(conversation_snippet: str) -> List[dict]:
+    """
+    Ask GPT-4o to extract memorable facts from a conversation snippet.
+    Returns a list of dicts: [{content, type, importance, tags}]
+    """
     prompt = f"""Extract memorable facts about the user from this conversation.
-Return a JSON array of objects with fields: content, type, importance, tags.
-Only include facts genuinely worth remembering. Return [] if none.
+Return a JSON array of objects with fields:
+  content    (string) — the fact, written as a statement about the user
+  type       (string) — one of: fact, preference, goal, event, conversation
+  importance (float)  — 0.0 to 1.0
+  tags       (array)  — relevant keyword tags
+
+Only include facts genuinely worth remembering long-term.
+Return [] if there are none worth storing.
+
 Conversation:
 {conversation_snippet}
-Return ONLY valid JSON."""
-    response = _client.chat.completions.create(model=CHAT_MODEL, temperature=0.2, max_tokens=512, messages=[{"role": "user", "content": prompt}])
+
+Return ONLY valid JSON, nothing else."""
+
+    response = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=512,
+        temperature=0.2,
+    )
     raw = response.choices[0].message.content.strip()
+
+    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
+        if raw.startswith("json"):
+            raw = raw[4:]
     try:
         facts = json.loads(raw)
         return facts if isinstance(facts, list) else []
-    except:
+    except json.JSONDecodeError:
         return []
