@@ -7,7 +7,6 @@ from services.voice import text_to_speech
 from supabase import create_client
 import os
 import json
-from datetime import datetime
 
 router = APIRouter()
 
@@ -18,9 +17,9 @@ def get_conversation_history(user_id: str, limit: int = 20) -> list[ChatMessage]
     """Fetch recent conversation history for this user from Supabase."""
     result = (
         supabase.table("conversations")
-        .select("role,content,timestamp")
+        .select("role,content,created_at")
         .eq("user_id", user_id)
-        .order("timestamp", desc=True)
+        .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
@@ -34,7 +33,6 @@ def save_message(user_id: str, role: str, content: str):
         "user_id": user_id,
         "role": role,
         "content": content,
-        "timestamp": datetime.utcnow().isoformat(),
     }).execute()
 
 
@@ -114,7 +112,7 @@ async def send_message_voice(req: ChatRequest):
 
 @router.get("/stream")
 async def stream_message(user_id: str, message: str):
-    """Server-sent events stream for real-time token-by-token response."""
+    """Server-sent events stream for real-time token-by-toker response."""
     async def event_generator():
         history = get_conversation_history(user_id)
         memories = search_memories(user_id, message, limit=15)
@@ -139,9 +137,9 @@ async def get_history(user_id: str, limit: int = 50):
     """Fetch conversation history for the chat screen."""
     result = (
         supabase.table("conversations")
-        .select("role,content,timestamp")
+        .select("role,content,created_at")
         .eq("user_id", user_id)
-        .order("timestamp", desc=False)
+        .order("created_at", desc=False)
         .limit(limit)
         .execute()
     )
