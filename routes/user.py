@@ -36,6 +36,12 @@ async def create_user(profile: UserProfile):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/providers")
+async def get_available_providers():
+    """List all available AI providers and models — used by the settings screen."""
+    return {"providers": list_providers()}
+
+
 @router.get("/{user_id}", response_model=dict)
 async def get_user(user_id: str):
     """Fetch a user's full profile."""
@@ -93,7 +99,7 @@ async def delete_user(user_id: str):
 async def user_summary(user_id: str):
     """
     Return a quick dashboard summary: profile + counts.
-    Used by the Settings screen in the mobile app.
+    Used by the Settings screen in mobile app.
     """
     try:
         profile_result = (
@@ -152,12 +158,6 @@ async def update_ai_provider(user_id: str, body: AIProviderUpdate):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/providers")
-async def get_available_providers():
-    """List all available AI providers and models — used by the settings screen."""
-    return {"providers": list_providers()}
 
 
 @router.patch("/{user_id}/personality")
