@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from models.schemas import UserProfile
+from models.schemas import UserProfile, AIProviderUpdate
+from services.ai_provider import list_providers
 from supabase import create_client
 import os
 import uuid
@@ -124,6 +125,39 @@ async def user_summary(user_id: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/{user_id}/ai-provider")
+async def update_ai_provider(user_id: str, body: AIProviderUpdate):
+    """
+    Switch the user's AI brain.
+    Body: { "ai_provider": "anthropic", "ai_model": "claude-sonnet-4-6" }
+    Supported providers: openai, anthropic, gemini, ollama, groq
+    """
+    try:
+        update_data = {
+            "ai_provider": body.ai_provider,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        if body.ai_model:
+            update_data["ai_model"] = body.ai_model
+        else:
+            update_data["ai_model"] = None  # clear model override, use provider default
+
+        supabase.table("users").update(update_data).eq("user_id", user_id).execute()
+        return {
+            "updated": True,
+            "ai_provider": body.ai_provider,
+            "ai_model": body.ai_model,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/providers")
+async def get_available_providers():
+    """List all available AI providers and models — used by the settings screen."""
+    return {"providers": list_providers()}
 
 
 @router.patch("/{user_id}/personality")
