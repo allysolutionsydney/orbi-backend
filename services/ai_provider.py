@@ -392,7 +392,7 @@ def list_providers() -> dict:
         "ollama": {
             "label": "Ollama (Local)",
             "models": ["llama3", "mistral", "phi3", "gemma"],
-            "requires_key": Nole,
+            "requires_key": None,
         },
         "groq": {
             "label": "Groq",
