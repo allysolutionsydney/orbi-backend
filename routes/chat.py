@@ -35,12 +35,15 @@ def get_conversation_history(user_id: str, limit: int = 20) -> list[ChatMessage]
 
 
 def save_message(user_id: str, role: str, content: str):
-    """Persist a message to conversation history."""
-    supabase.table("conversations").insert({
-        "user_id": user_id,
-        "role": role,
-        "content": content,
-    }).execute()
+    """Persist a message to conversation history. Silently skips on DB errors."""
+    try:
+        supabase.table("conversations").insert({
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Could not save message (user may not exist in users table yet): {e}")
 
 
 def get_user_profile(user_id: str) -> dict:
@@ -73,7 +76,7 @@ async def send_message(req: ChatRequest):
         # 3. Get ORBI's reply using the user's chosen AI brain
         reply = chat(
             message=req.message,
-            conversation_history=kistory,
+            conversation_history=history,
             memories=memories,
             user_profile=profile,
             image_base64=req.image_base64 if req.include_vision else None,
