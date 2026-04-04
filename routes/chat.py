@@ -8,6 +8,9 @@ from services.ai_provider import list_providers
 from supabase import create_client
 import os
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
@@ -15,16 +18,20 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_
 
 def get_conversation_history(user_id: str, limit: int = 20) -> list[ChatMessage]:
     """Fetch recent conversation history for this user from Supabase."""
-    result = (
-        supabase.table("conversations")
-        .select("role,content,created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    rows = list(reversed(result.data or []))
-    return [ChatMessage(role=r["role"], content=r["content"]) for r in rows]
+    try:
+        result = (
+            supabase.table("conversations")
+            .select("role,content,created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(result.data or []))
+        return [ChatMessage(role=r["role"], content=r["content"]) for r in rows]
+    except Exception as e:
+        logger.warning(f"Could not fetch conversation history: {e}")
+        return []
 
 
 def save_message(user_id: str, role: str, content: str):
@@ -37,9 +44,14 @@ def save_message(user_id: str, role: str, content: str):
 
 
 def get_user_profile(user_id: str) -> dict:
-    """Fetch the user's full profile including their chosen AI provider."""
-    result = supabase.table("users").select("*").eq("user_id", user_id).limit(1).execute()
-    return result.data[0] if result.data else {}
+    """Fetch the user's full profile including their chosen AI provider.
+    Returns {} gracefully if the users table doesn't exist yet."""
+    try:
+        result = supabase.table("users").select("*").eq("user_id", user_id).limit(1).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        logger.warning(f"Could not fetch user profile (users table may not exist yet): {e}")
+        return {}
 
 
 @router.post("/", response_model=ChatResponse)
@@ -61,7 +73,7 @@ async def send_message(req: ChatRequest):
         # 3. Get ORBI's reply using the user's chosen AI brain
         reply = chat(
             message=req.message,
-            conversation_history=history,
+            conversation_history=kistory,
             memories=memories,
             user_profile=profile,
             image_base64=req.image_base64 if req.include_vision else None,
@@ -83,7 +95,8 @@ async def send_message(req: ChatRequest):
         return ChatResponse(reply=reply, memories_used=len(memories))
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Chat error ({type(e).__name__}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @router.post("/voice", response_class=Response)
